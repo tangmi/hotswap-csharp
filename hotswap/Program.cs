@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -8,76 +9,87 @@ namespace hotswap
 {
     internal class Program
     {
-        private static readonly string absd_app = AppDomain.CurrentDomain.BaseDirectory;
-        private static readonly string absf_dll = Path.Combine(absd_app, "module.dll");
-        private static readonly string absf_dll_in_use = Path.Combine(absd_app, "module.inuse.dll");
+        private static readonly string absdApp = AppDomain.CurrentDomain.BaseDirectory;
+        private static readonly string absfDll = Path.Combine(absdApp, "module.dll");
+        private static readonly string absfDllInUse = Path.Combine(absdApp, "module.inuse.dll");
+
+        private const string stModuleName = "module.Module";
+        private const string stMethodName = "Update";
+        public static readonly Type[] methodParamTypes = {};
+        static AssemblyLoader asm;
 
         private static void Main(string[] args)
         {
-            Console.WriteLine("loading from {0}", absf_dll);
+            Console.WriteLine("loading from {0}", absfDll);
 
-            if (File.Exists(absf_dll))
+            Debug.Assert(!File.Exists(absfDllInUse), "leftover state from a previous run! " + absfDllInUse + " still exists!");
+
+            try
             {
-                File.Move(absf_dll, absf_dll_in_use);
-            } else if (!File.Exists(absf_dll_in_use))
-            {
-                throw new DllNotFoundException();
+                if (File.Exists(absfDll))
+                {
+                    File.Move(absfDll, absfDllInUse);
+                }
+                else if (!File.Exists(absfDllInUse))
+                {
+                    throw new DllNotFoundException();
+                }
+
+                while (Console.ReadKey().Key != ConsoleKey.Escape)
+                {
+                    if (File.Exists(absfDll))
+                    {
+                        File.Delete(absfDllInUse); // we currently hold this dll
+                        File.Move(absfDll, absfDllInUse);
+                    }
+
+                    var domain = AppDomain.CreateDomain("hotswap");
+                    try
+                    {
+                        var loader = (AssemblyLoader)domain.CreateInstanceAndUnwrap(
+                            typeof(AssemblyLoader).Assembly.FullName,
+                            typeof(AssemblyLoader).FullName);
+                        loader.LoadAssembly(absfDllInUse);
+                        var ret = loader.ExecuteStaticMethod(stModuleName, stMethodName);
+                        Console.WriteLine(ret);
+                    }
+                    finally
+                    {
+                        AppDomain.Unload(domain);
+                    }
+                }
             }
-
-            while (Console.ReadKey().Key != ConsoleKey.Escape)
+            finally
             {
-                if (File.Exists(absf_dll))
-                {
-                    File.Delete(absf_dll_in_use); // we currently hold this dll
-                    File.Move(absf_dll, absf_dll_in_use);
-                }
-
-                var new_domain = AppDomain.CreateDomain( // lazily create thgis
-                    AppDomain.CurrentDomain.FriendlyName,
-                    AppDomain.CurrentDomain.Evidence);
-//                register_assembly_resolve(new_domain);
-                try
-                {
-                    var assembly = Assembly.LoadFrom(absf_dll_in_use);
-
-                    var ret =
-                        assembly
-                            .GetType("module.Module")
-                            .GetMethod("Update", BindingFlags.Public | BindingFlags.Static)
-                            .Invoke(null, null);
-
-                    Console.WriteLine(ret);
-                }
-                finally
-                {
-                    AppDomain.Unload(new_domain);
-                }
+                File.Move(absfDllInUse, absfDll);
             }
+        }
+    }
 
-            File.Move(absf_dll_in_use, absf_dll);
+    class AssemblyLoader : MarshalByRefObject
+    {
+        private Assembly assembly;
 
-            var type2 = load_from_app_domain("module.Module");
-//            Debug.Assert(type2 == null); // does it matter that it's still loaded?
+        public override object InitializeLifetimeService()
+        {
+            return null;
         }
 
-//        static readonly string absd_app = Path.Combine(
-//            Path.GetDirectoryName(Assembly.GetExecutingAssembly().GetName().CodeBase));
+        public void LoadAssembly(string path)
+        {
+            assembly = Assembly.Load(AssemblyName.GetAssemblyName(path));
+        }
 
-//        private static void register_assembly_resolve(AppDomain domain) => domain.AssemblyResolve += resolve;
-//
-//        private static Assembly resolve(object sender, ResolveEventArgs args)
-//        {
-//            var absf_asm_path = Path.Combine(absd_app, new AssemblyName(args.Name).Name + ".dll");
-//            if (File.Exists(absf_asm_path))
-//            {
-//                return Assembly.LoadFrom(absf_asm_path);
-//            }
-//            return null;
-//        }
+        public object ExecuteStaticMethod(string strModule, string methodName, params object[] parameters)
+        {
+            var type = assembly.GetType(strModule);
 
-        private static Type load_from_app_domain(string className) => AppDomain.CurrentDomain
-            .GetAssemblies()
-            .Select(assembly => assembly.GetType(className))
-            .SingleOrDefault(type => type != null); // throws exception if there's more than one??
+            var method = type.GetMethod(
+                methodName,
+                BindingFlags.Public | BindingFlags.Static);
+
+            return method.Invoke(null, parameters);
+        }
     }
+
 }
